@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#f7f7f4">
+  <meta name="description" content="指を押している間だけ、小さな黒いラインが指先へ集まるミニゲーム。">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <title>WORM — tap and hold</title>
+  <style>
+    :root { color-scheme: light; --paper:#f7f7f4; --ink:#171717; --muted:#8b8b84; }
+    * { box-sizing:border-box; }
+    html, body { margin:0; width:100%; height:100%; overflow:hidden; background:var(--paper); }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color:var(--ink); touch-action:none; user-select:none; -webkit-user-select:none;
+      overscroll-behavior:none;
+    }
+    #stage { position:fixed; inset:0; display:grid; place-items:center; }
+    canvas { position:absolute; inset:0; width:100%; height:100%; touch-action:none; }
+    .ui { position:absolute; z-index:2; pointer-events:none; text-align:center; }
+    .top { top:max(28px, env(safe-area-inset-top)); left:0; right:0; }
+    .brand { font-size:11px; letter-spacing:.32em; font-weight:600; }
+    .hint { margin-top:12px; font-size:13px; color:var(--muted); letter-spacing:.04em; }
+    .bottom { bottom:max(30px, env(safe-area-inset-bottom)); left:0; right:0; }
+    .status { font-size:11px; color:var(--muted); letter-spacing:.12em; }
+    .count { margin-top:8px; font-size:24px; font-weight:300; font-variant-numeric:tabular-nums; }
+    .count small { font-size:10px; color:var(--muted); letter-spacing:.12em; margin-left:5px; }
+    .active .hint { color:var(--ink); }
+    @media (prefers-reduced-motion: reduce) { * { animation:none !important; } }
+  </style>
+</head>
+<body>
+  <main id="stage" aria-label="WORM tap and hold game">
+    <canvas id="scene"></canvas>
+    <header class="ui top">
+      <div class="brand">W O R M</div>
+      <div class="hint" id="hint">画面を押し続けてください</div>
+    </header>
+    <footer class="ui bottom">
+      <div class="status" id="status">TAP &amp; HOLD</div>
+      <div class="count"><span id="number">0</span><small>LINES</small></div>
+    </footer>
+  </main>
+<script>
+(() => {
+  const canvas = document.getElementById('scene');
+  const ctx = canvas.getContext('2d');
+  const hint = document.getElementById('hint');
+  const status = document.getElementById('status');
+  const number = document.getElementById('number');
+
+  let w = 0, h = 0, dpr = 1, active = false, pointer = null;
+  let worms = [], smoke = [], raf = 0, lastSpawn = 0;
+  const TAU = Math.PI * 2;
+  const rand = (a,b) => a + Math.random() * (b-a);
+  const clamp = (v,a,b) => Math.max(a,Math.min(b,v));
+  const ease = t => t*t*(3-2*t);
+
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    w = window.innerWidth; h = window.innerHeight;
+    canvas.width = Math.round(w*dpr);
+    canvas.height = Math.round(h*dpr);
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    drawIdle();
+  }
+  window.addEventListener('resize', resize, {passive:true});
+
+  function makeWorm(now) {
+    const angle = rand(0, TAU);
+    const distance = rand(95, Math.min(Math.max(w,h)*.48, 280));
+    const length = rand(58, 84); // 個体ごとに長さを変える
+    worms.push({
+      x: pointer.x + Math.cos(angle)*distance,
+      y: pointer.y + Math.sin(angle)*distance,
+      length,
+      width: rand(1.05, 2.05),       // 個体ごとに太さを変える
+      segments: 20,
+      phase: rand(0,TAU),
+      frequency: rand(2.4,4.0),
+      speed: rand(.48,.78),
+      amplitude: rand(5.5,10),
+      drift: rand(-.22,.22),
+      born: now,
+      life: rand(2.0,2.8)
+    });
+  }
+
+  function createSmoke(x,y) {
+    // 指を離した瞬間、各ラインの周囲から小さな煙粒子を放つ
+    for (const worm of worms) {
+      const progress = clamp((performance.now()-worm.born)/1000/worm.life,0,1);
+      const headX = worm.x + (x-worm.x)*progress;
+      const headY = worm.y + (y-worm.y)*progress;
+      const count = 7 + Math.floor(Math.random()*5);
+      for (let i=0;i<count;i++) {
+        const a = rand(0,TAU), r = rand(0,8);
+        smoke.push({
+          x: headX + Math.cos(a)*r,
+          y: headY + Math.sin(a)*r,
+          vx: Math.cos(a)*rand(8,34) + rand(-8,8),
+          vy: Math.sin(a)*rand(8,34) - rand(5,20),
+          radius: rand(1.2,3.5),
+          life: rand(.42,.85),
+          born: performance.now(),
+          seed: rand(0,TAU)
+        });
+      }
+    }
+  }
+
+  function start(e) {
+    if (active) return;
+    e.preventDefault();
+    active = true;
+    pointer = {x:e.clientX,y:e.clientY};
+    worms = [];
+    smoke = [];
+    // 押した瞬間から最低5本を表示し、初期表示の待ち時間をなくす
+    const now = performance.now();
+    for (let i=0; i<5; i++) makeWorm(now);
+    lastSpawn = now;
+    document.getElementById('stage').classList.add('active');
+    hint.textContent = '指を動かしても大丈夫です';
+    status.textContent = 'HOLDING';
+    try { canvas.setPointerCapture(e.pointerId); } catch(_) {}
+    cancelAnimationFrame(raf);
+    raf = requestAnimationFrame(loop);
+  }
+
+  function move(e) {
+    if (!active || !pointer) return;
+    pointer.x = e.clientX;
+    pointer.y = e.clientY;
+  }
+
+  function stop() {
+    if (!active) return;
+    createSmoke(pointer.x,pointer.y);
+    active = false;
+    pointer = null;
+    worms = [];
+    document.getElementById('stage').classList.remove('active');
+    hint.textContent = '画面を押し続けてください';
+    status.textContent = 'TAP & HOLD';
+    number.textContent = '0';
+    cancelAnimationFrame(raf);
+    raf = requestAnimationFrame(smokeLoop);
+  }
+
+  function drawWorm(worm, now) {
+    const age = (now-worm.born)/1000;
+    const progress = clamp(age/worm.life,0,1);
+    const approach = ease(progress);
+    const dx = pointer.x-worm.x, dy = pointer.y-worm.y;
+    const angle = Math.atan2(dy,dx);
+    const nx = -Math.sin(angle), ny = Math.cos(angle);
+    const len = worm.length * (1 - progress*.12);
+    const strength = .35 + progress*1.65; // 指に近づくほど大きくうねる
+    const phase = now*.009*worm.speed + worm.phase;
+    const points = [];
+
+    for (let i=0;i<=worm.segments;i++) {
+      const t = i/worm.segments;
+      const along = t*len;
+      // 2つの波を重ね、単調な正弦波ではない生物的なうねりにする
+      const wave1 = Math.sin(t*TAU*worm.frequency - phase) * worm.amplitude;
+      const wave2 = Math.sin(t*TAU*(worm.frequency*.53) + phase*1.37) * worm.amplitude*.38;
+      const envelope = Math.sin(Math.PI*t)**.7;
+      const twitch = Math.sin(phase*1.8 + t*17) * (2.2+progress*2.8) * t;
+      const side = (wave1+wave2)*envelope*strength + twitch;
+      const bend = Math.sin(t*Math.PI)*worm.drift*len*.12;
+      const x = worm.x + dx*approach - Math.cos(angle)*along + nx*(side+bend);
+      const y = worm.y + dy*approach - Math.sin(angle)*along + ny*(side+bend);
+      points.push({x,y});
+    }
+
+    ctx.beginPath();
+    points.forEach((p,i)=>i ? ctx.lineTo(p.x,p.y) : ctx.moveTo(p.x,p.y));
+    ctx.strokeStyle = '#171717';
+    ctx.lineWidth = worm.width;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.globalAlpha = .9;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    return progress < 1;
+  }
+
+  function drawSmokeParticle(p, now) {
+    const age = (now-p.born)/1000;
+    const t = clamp(age/p.life,0,1);
+    const fade = (1-t)*(1-t);
+    p.x += p.vx/60;
+    p.y += p.vy/60;
+    p.vx *= .985;
+    p.vy = p.vy*.985 - .05;
+    const wobble = Math.sin(now*.006+p.seed)*1.1;
+    ctx.beginPath();
+    ctx.arc(p.x+wobble,p.y,p.radius*(.7+t*.9),0,TAU);
+    ctx.fillStyle = `rgba(45,45,45,${.24*fade})`;
+    ctx.fill();
+    return t < 1;
+  }
+
+  function loop(now) {
+    ctx.clearRect(0,0,w,h);
+    if (!active) return;
+    const target = 5 + Math.floor((Math.sin(now*.0007)+1)*7.5); // 5〜20本
+    worms = worms.filter(worm=>drawWorm(worm,now));
+    // 寿命が重なって本数が一時的に5本未満にならないよう即時補充
+    while (worms.length < 5) makeWorm(now);
+    if (now-lastSpawn > 115 && worms.length < target) {
+      makeWorm(now);
+      lastSpawn = now;
+    }
+    ctx.beginPath();
+    ctx.arc(pointer.x,pointer.y,2.0,0,TAU);
+    ctx.fillStyle='#171717';
+    ctx.fill();
+    number.textContent=String(worms.length);
+    raf=requestAnimationFrame(loop);
+  }
+
+  function smokeLoop(now) {
+    ctx.clearRect(0,0,w,h);
+    smoke = smoke.filter(p=>drawSmokeParticle(p,now));
+    if (smoke.length) raf=requestAnimationFrame(smokeLoop);
+    else drawIdle();
+  }
+
+  function drawIdle() { ctx.clearRect(0,0,w,h); }
+
+  canvas.addEventListener('pointerdown',start,{passive:false});
+  canvas.addEventListener('pointermove',move,{passive:true});
+  window.addEventListener('pointerup',stop,{passive:true});
+  window.addEventListener('pointercancel',stop,{passive:true});
+  window.addEventListener('blur',stop);
+  document.addEventListener('visibilitychange',()=>{if(document.hidden) stop();});
+  resize();
+})();
+</script>
+</body>
+</html>
